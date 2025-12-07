@@ -1,3 +1,4 @@
+"""
 import logging
 import os
 import pandas as pd
@@ -65,10 +66,10 @@ def set_summary_writer(log_dir):
     return writer
 
 def tensorboard_loss_log(name, loss_np_arr, writer, epoch):
-    """
+    '''
     To plot graphs for TensorBoard log. The save directory for this
     is the same as the training result save directory.
-    """
+    '''
     writer.add_scalar(name, loss_np_arr[-1], epoch)
 
 def tensorboard_map_log(name, val_map_05, val_map, writer, epoch):
@@ -148,13 +149,13 @@ def wandb_log(
     val_pred_image,
     image_size
 ):
-    """
+    '''
     :param epoch_loss: Single loss value for the current epoch.
     :param batch_loss_list: List containing loss values for the current 
         epoch's loss value for each batch.
     :param val_map_05: Current epochs validation mAP@0.5 IoU.
     :param val_map: Current epochs validation mAP@0.5:0.95 IoU. 
-    """
+    '''
     # WandB logging.
     for i in range(len(loss_list_batch)):
         wandb.log(
@@ -217,18 +218,18 @@ def wandb_log(
         wandb.log({'predictions': [wandb.Image(log_image)]})
 
 def wandb_save_model(model_dir):
-    """
+    '''
     Uploads the models to Weights&Biases.
 
     :param model_dir: Local disk path where models are saved.
-    """
+    '''
     wandb.save(os.path.join(model_dir, 'best_model.pth'))
 
 class LogJSON():
     def __init__(self, output_filename):
-        """
+        '''
         :param output_filename: Path where the JSOn file should be saved.
-        """
+        '''
         if not os.path.exists(output_filename):
         # Initialize file with basic structure if it doesn't exist
             with open(output_filename, 'w') as file:
@@ -244,14 +245,14 @@ class LogJSON():
         self.image_id = len(self.images) + 1
 
     def update(self, image, file_name, boxes, labels, classes):
-        """
+        '''
         Update the log file metrics with the current image or current frame information.
 
         :param image: The original image/frame.
         :param file_name: image file name.
         :param output: Model outputs.
         :param classes: classes in the model.
-        """
+        '''
         image_info = {
             "file_name": file_name, "width": image.shape[1], "height": image.shape[0]
         }
@@ -288,8 +289,306 @@ class LogJSON():
         self.coco_data['categories'] = [{"id": cat_id, "name": classes[cat_id]} for cat_id in self.categories]
 
     def save(self, output_filename):
-        """
+        '''
         :param output_filename: Path where the JSOn file should be saved.
-        """
+        '''
         with open(output_filename, 'w') as file:
             json.dump(self.coco_data, file, indent=4)
+"""
+import logging
+import os
+import pandas as pd
+import wandb
+import cv2
+import numpy as np
+import json
+
+from torch.utils.tensorboard.writer import SummaryWriter
+
+# Initialize Weights and Biases.
+def wandb_init(name):
+    wandb.init(name=name)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+def set_log(log_dir):
+    logging.basicConfig(
+        format='%(message)s',
+        filename=f"{log_dir}/train.log",
+        filemode='w'
+    )
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    logging.getLogger().addHandler(console)
+
+def log(content, *args):
+    for arg in args:
+        content += str(arg)
+    logger.info(content)
+
+def coco_log(log_dir, stats):
+    log_dict_keys = [
+        'Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ]',
+        'Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ]',
+        'Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ]',
+        'Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ]',
+        'Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ]',
+        'Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ]',
+        'Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ]',
+        'Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ]',
+        'Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ]',
+        'Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ]',
+        'Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ]',
+        'Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ]',
+    ]
+
+    with open(f"{log_dir}/train.log", 'a+') as f:
+        f.writelines('\n')
+        for i, key in enumerate(log_dict_keys):
+            out_str = f"{key} = {stats[i]}"
+            logger.debug(out_str)
+        logger.debug('\n'*2)
+
+def set_summary_writer(log_dir):
+    writer = SummaryWriter(log_dir=log_dir)
+    return writer
+
+def tensorboard_loss_log(name, loss_np_arr, writer, epoch):
+    """
+    To plot graphs for TensorBoard log. The save directory for this
+    is the same as the training result save directory.
+    """
+    writer.add_scalar(name, loss_np_arr[-1], epoch)
+
+def tensorboard_map_log(name, val_map_05, val_map, writer, epoch):
+    writer.add_scalars(
+        name,
+        {
+            'mAP@0.5': val_map_05[-1],
+            'mAP@0.5_0.95': val_map[-1]
+        },
+        epoch
+    )
+
+def create_log_csv(log_dir):
+    cols = [
+        'epoch',
+        # COCO summary AP/AR metrics.
+        'map',        # AP@[0.50:0.95] all
+        'map_05',     # AP@0.50 all
+
+        # Additional COCO breakdown metrics (COCOeval.stats indices 2..11).
+        'ap_75',
+        'ap_small',
+        'ap_medium',
+        'ap_large',
+        'ar_1',
+        'ar_10',
+        'ar_100',
+        'ar_small',
+        'ar_medium',
+        'ar_large',
+
+        # Training losses (epoch-wise).
+        'train loss',
+        'train cls loss',
+        'train box reg loss',
+        'train obj loss',
+        'train rpn loss',
+
+        # Validation losses (epoch-wise).
+        'val loss',
+        'val cls loss',
+        'val box reg loss',
+        'val obj loss',
+        'val rpn loss'
+    ]
+    results_csv = pd.DataFrame(columns=cols)
+    results_csv.to_csv(os.path.join(log_dir, 'results.csv'), index=False)
+
+def csv_log(
+    log_dir,
+    stats,
+    epoch,
+    train_loss_list_epoch,
+    loss_cls_list,
+    loss_box_reg_list,
+    loss_objectness_list,
+    loss_rpn_list,
+    val_loss_list_epoch,
+    val_loss_cls_list,
+    val_loss_box_reg_list,
+    val_loss_objectness_list,
+    val_loss_rpn_list
+):
+    """
+    Logs epoch-wise training & validation losses alongside COCO metrics
+    into a single CSV file.
+
+    COCOeval.stats ordering:
+        0: AP@[0.50:0.95] all
+        1: AP@0.50 all
+        2: AP@0.75 all
+        3: AP small
+        4: AP medium
+        5: AP large
+        6: AR@1
+        7: AR@10
+        8: AR@100
+        9: AR small
+        10: AR medium
+        11: AR large
+    """
+    if epoch + 1 == 1:
+        create_log_csv(log_dir)
+
+    df = pd.DataFrame(
+        {
+            'epoch': int(epoch + 1),
+            'map': [float(stats[0])],
+            'map_05': [float(stats[1])],
+            'ap_75': [float(stats[2])],
+            'ap_small': [float(stats[3])],
+            'ap_medium': [float(stats[4])],
+            'ap_large': [float(stats[5])],
+            'ar_1': [float(stats[6])],
+            'ar_10': [float(stats[7])],
+            'ar_100': [float(stats[8])],
+            'ar_small': [float(stats[9])],
+            'ar_medium': [float(stats[10])],
+            'ar_large': [float(stats[11])],
+            'train loss': train_loss_list_epoch[-1],
+            'train cls loss': loss_cls_list[-1],
+            'train box reg loss': loss_box_reg_list[-1],
+            'train obj loss': loss_objectness_list[-1],
+            'train rpn loss': loss_rpn_list[-1],
+            'val loss': val_loss_list_epoch[-1],
+            'val cls loss': val_loss_cls_list[-1],
+            'val box reg loss': val_loss_box_reg_list[-1],
+            'val obj loss': val_loss_objectness_list[-1],
+            'val rpn loss': val_loss_rpn_list[-1],
+        }
+    )
+    df.to_csv(
+        os.path.join(log_dir, 'results.csv'),
+        mode='a',
+        index=False,
+        header=False
+    )
+
+def overlay_on_canvas(bg, image):
+    bg_copy = bg.copy()
+    h, w = bg.shape[:2]
+    h1, w1 = image.shape[:2]
+    # Center of canvas (background).
+    cx, cy = (h - h1) // 2, (w - w1) // 2
+    bg_copy[cy:cy + h1, cx:cx + w1] = image
+    return bg_copy * 255.
+
+def wandb_log(
+    epoch_loss, 
+    loss_list_batch, 
+    loss_cls_list, 
+    loss_box_reg_list, 
+    loss_objectness_list,
+    loss_rpn_list, 
+    val_map_05, 
+    val_map,
+    val_pred_image,
+    image_size
+):
+    """
+    :param epoch_loss: Single loss value for the current epoch.
+    :param batch_loss_list: List containing loss values for the current 
+        epoch's loss value for each batch.
+    :param val_map_05: Current epochs validation mAP@0.5 IoU.
+    :param val_map: Current epochs validation mAP@0.5:0.95 IoU. 
+    """
+    # WandB logging.
+    for i in range(len(loss_list_batch)):
+        wandb.log(
+            {
+                'Train loss': loss_list_batch[i] 
+            }
+        )
+    wandb.log(
+        {
+            'Epoch train loss': epoch_loss 
+        }
+    )
+    wandb.log(
+        {
+            'Train cls loss': loss_cls_list[-1] 
+        }
+    )
+    wandb.log(
+        {
+            'Train box reg loss': loss_box_reg_list[-1] 
+        }
+    )
+    wandb.log(
+        {
+            'Train obj loss': loss_objectness_list[-1] 
+        }
+    )
+    wandb.log(
+        {
+            'Train rpn loss': loss_rpn_list[-1] 
+        }
+    )
+    wandb.log(
+        {
+            'mAP@0.5 IoU': val_map_05 
+        }
+    )
+    wandb.log(
+        {
+            'mAP@0.5:0.95 IoU': val_map 
+        }
+    )
+
+    # Log first validation prediction image.
+    if val_pred_image.shape[0] != 1:
+        # Convert to uint8.
+        val_pred_image = (val_pred_image * 255).astype(np.uint8)
+        # Resize to 640.
+        val_pred_image = cv2.resize(
+            val_pred_image, 
+            (image_size, image_size)
+        )
+        # Log.
+        wandb.log({'Validation predictions': wandb.Image(val_pred_image)})
+
+def wandb_save_model(save_dir):
+    art = wandb.Artifact('model', type='model')
+    art.add_file(os.path.join(save_dir, 'last_model_state.pth'))
+    wandb.log_artifact(art)
+
+class LogJSON:
+    def __init__(self, start_epoch, log_dir):
+        self.start_epoch = start_epoch
+        self.log_dir = log_dir
+
+    def log(
+        self,
+        losses, 
+        lrs, 
+        batch_loss_list, 
+        train_loss_list,
+        train_loss_list_epoch,
+        val_map,
+        val_map_05
+    ):
+        log_dict = {
+            'start_epoch': self.start_epoch,
+            'losses': losses,
+            'lrs': lrs,
+            'batch_loss_list': batch_loss_list,
+            'train_loss_list': train_loss_list,
+            'train_loss_list_epoch': train_loss_list_epoch,
+            'val_map': val_map,
+            'val_map_05': val_map_05
+        }
+        with open(os.path.join(self.log_dir, 'log.json'), 'w') as f:
+            json.dump(log_dict, f, indent=4)
